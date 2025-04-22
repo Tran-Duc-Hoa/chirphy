@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net/http"
 	"os"
-	"strings"
 	"sync/atomic"
 
 	"github.com/Tran-Duc-Hoa/chirphy/internal/database"
@@ -97,6 +96,57 @@ func main() {
 		w.Write(data)
 	})
 
+	mux.HandleFunc("POST /api/chirps", func(w http.ResponseWriter, r *http.Request) {
+		var requestBody struct {
+			Body string `json:"body"`
+			UserId uuid.UUID `json:"user_id"`
+		}
+		
+		decoder := json.NewDecoder(r.Body)
+		err := decoder.Decode(&requestBody)
+		if err != nil || requestBody.Body == "" || requestBody.UserId == uuid.Nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			fmt.Fprint(w, `{"error": "Invalid request body"}`)
+			return
+		}
+
+		chirpyParams := database.CreateChirpyParams{
+			Body:   requestBody.Body,
+			UserID: requestBody.UserId,
+		}
+		chirpy, err := cfg.db.CreateChirpy(r.Context(), chirpyParams)
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			fmt.Fprint(w, `{"error": "Failed to create chirp"}`)
+			return
+		}
+
+		respBody := struct {
+			ID        uuid.UUID  `json:"id"`
+			CreatedAt string `json:"created_at"`
+			UpdatedAt string `json:"updated_at"`
+			Body      string `json:"body"`
+			UserId    uuid.UUID `json:"user_id"`
+		} {
+			ID:        chirpy.ID,
+			CreatedAt: chirpy.CreatedAt.Format("2006-01-02T15:04:05Z"),
+			UpdatedAt: chirpy.UpdatedAt.Format("2006-01-02T15:04:05Z"),
+			Body:      chirpy.Body,
+			UserId:    chirpy.UserID,
+		}
+		data, err := json.Marshal(&respBody)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		w.Write(data)
+	})
+
 	mux.Handle("/app/", cfg.middlewareMetricsInc(http.StripPrefix("/app", http.FileServer(http.Dir(".")))))
 	mux.Handle("GET /api/healthz", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
@@ -122,53 +172,6 @@ func main() {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("Hits reset to 0\n"))
-	})
-	mux.HandleFunc("POST /api/validate_chirp", func(w http.ResponseWriter, r *http.Request) {
-		var requestBody struct {
-			Body string `json:"body"`
-		}
-
-		 decoder:= json.NewDecoder(r.Body)
-		err := decoder.Decode(&requestBody)
-		if err != nil {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusBadRequest)
-			fmt.Fprint(w, `{"error": "Something went wrong"}`)
-			return
-		}
-
-		if len(requestBody.Body) > 140 {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusBadRequest)
-			fmt.Fprint(w, `{"error": "Chirp is too long"}`)
-			return
-		}
-
-		words := strings.Split(requestBody.Body, " ")
-		for i, word := range words {
-			loweredWord := strings.ToLower(word)
-			if loweredWord == "kerfuffle" || loweredWord == "sharbert" || loweredWord == "fornax" {
-				words[i] = "****"
-			}
-		}
-
-		type responseBody struct {
-			Valid   bool   `json:"valid"`
-			CleanedBody   string `json:"cleaned_body"`
-		}
-		respBody := responseBody{
-			Valid: true,
-			CleanedBody: strings.Join(words, " "),
-		}
-		data, err := json.Marshal(&respBody)
-		if err != nil {
-			w.WriteHeader(500)
-			return
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		w.Write(data)
 	})
 
 	fmt.Print("Starting server on http://localhost:8080\n")
