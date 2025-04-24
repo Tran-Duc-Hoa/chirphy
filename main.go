@@ -115,6 +115,7 @@ func main() {
 			Body:   requestBody.Body,
 			UserID: requestBody.UserId,
 		}
+
 		chirpy, err := cfg.db.CreateChirpy(r.Context(), chirpyParams)
 		if err != nil {
 			w.Header().Set("Content-Type", "application/json")
@@ -144,6 +145,87 @@ func main() {
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
+		w.Write(data)
+	})
+	mux.HandleFunc("GET /api/chirps", func(w http.ResponseWriter, r *http.Request) {
+		chirps, err := cfg.db.GetChirps(r.Context())
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			fmt.Fprint(w, `{"error": "Failed to retrieve chirps"}`)
+			return
+		}
+
+		type responseBody struct {
+			ID        uuid.UUID  `json:"id"`
+			CreatedAt string `json:"created_at"`
+			UpdatedAt string `json:"updated_at"`
+			Body      string `json:"body"`
+			UserId    uuid.UUID `json:"user_id"`
+		}
+		respBody := make([]responseBody, len(chirps))
+
+		for i, chirp := range chirps {
+			respBody[i] = responseBody{
+				ID:        chirp.ID,
+				CreatedAt: chirp.CreatedAt.Format("2006-01-02T15:04:05Z"),
+				UpdatedAt: chirp.UpdatedAt.Format("2006-01-02T15:04:05Z"),
+				Body:      chirp.Body,
+				UserId:    chirp.UserID,
+			}	
+		}
+		data, err := json.Marshal(&respBody)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write(data)
+	})
+
+	mux.HandleFunc("/api/chirps/", func(w http.ResponseWriter, r *http.Request) {
+		idStr := r.URL.Path[len("/api/chirps/"):]
+		if idStr == "" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			fmt.Fprint(w, `{"error": "Missing chirp ID"}`)
+			return
+		}
+		id, err := uuid.Parse(idStr)
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			fmt.Fprint(w, `{"error": "Invalid chirp ID"}`)
+			return
+		}
+		chirp, err := cfg.db.GetChirpById(r.Context(), id)
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			fmt.Fprint(w, `{"error": "Failed to retrieve chirp"}`)
+			return
+		}
+		respBody := struct {
+			ID        uuid.UUID  `json:"id"`
+			CreatedAt string `json:"created_at"`
+			UpdatedAt string `json:"updated_at"`
+			Body      string `json:"body"`
+			UserId    uuid.UUID `json:"user_id"`
+		}{
+			ID:        chirp.ID,
+			CreatedAt: chirp.CreatedAt.Format("2006-01-02T15:04:05Z"),
+			UpdatedAt: chirp.UpdatedAt.Format("2006-01-02T15:04:05Z"),
+			Body:      chirp.Body,
+			UserId:    chirp.UserID,
+		}
+		data, err := json.Marshal(&respBody)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
 		w.Write(data)
 	})
 
