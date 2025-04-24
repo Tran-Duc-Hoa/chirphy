@@ -8,6 +8,7 @@ import (
 	"os"
 	"sync/atomic"
 
+	"github.com/Tran-Duc-Hoa/chirphy/internal/auth"
 	"github.com/Tran-Duc-Hoa/chirphy/internal/database"
 	"github.com/google/uuid"
 	"github.com/joho/godotenv"
@@ -51,19 +52,30 @@ func main() {
 
 	mux.HandleFunc("POST /api/users", func(w http.ResponseWriter, r *http.Request) {
 		var requestBody struct {
-			Email string `json:"email"`
+			Email    string `json:"email"`
+			Password string `json:"password"`
 		}
 
 		decoder := json.NewDecoder(r.Body)
 		err := decoder.Decode(&requestBody)
-		if err != nil || requestBody.Email == "" {
+		if err != nil || requestBody.Email == "" || requestBody.Password == "" {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusBadRequest)
 			fmt.Fprint(w, `{"error": "Invalid request body"}`)
 			return
 		}
 
-		user, err := cfg.db.CreateUser(r.Context(), requestBody.Email)
+		hashedPassword, err := auth.HashPassword(requestBody.Password)
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			fmt.Fprint(w, `{"error": "Failed to hash password"}`)
+			return
+		}
+		user, err := cfg.db.CreateUser(r.Context(), database.CreateUserParams{
+			Email:    requestBody.Email,
+			HashedPassword: hashedPassword,
+		})
 		if err != nil {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusInternalServerError)
@@ -72,13 +84,74 @@ func main() {
 		}
 
 		type responseBody struct {
-			ID        uuid.UUID  `json:"id"`
-			Email     string `json:"email"`
-			CreatedAt string `json:"created_at"`
-			UpdatedAt string `json:"updated_at"`
+			ID        uuid.UUID `json:"id"`
+			Email     string    `json:"email"`
+			CreatedAt string    `json:"created_at"`
+			UpdatedAt string    `json:"updated_at"`
 		}
 
-		respBody := responseBody{
+		respBody := struct {
+				ID        uuid.UUID `json:"id"`
+				Email     string    `json:"email"`
+				CreatedAt string    `json:"created_at"`
+				UpdatedAt string    `json:"updated_at"`
+			}{
+				ID:        user.ID,
+				Email:     user.Email,
+				CreatedAt: user.CreatedAt.Format("2006-01-02T15:04:05Z"),
+				UpdatedAt: user.UpdatedAt.Format("2006-01-02T15:04:05Z"),
+			}
+
+		
+
+		data, err := json.Marshal(&respBody)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		w.Write(data)
+	})
+
+	mux.HandleFunc("POST /api/login", func(w http.ResponseWriter, r *http.Request) {
+		var requestBody struct {
+			Email    string `json:"email"`
+			Password string `json:"password"`
+		}
+
+		decoder := json.NewDecoder(r.Body)
+		err := decoder.Decode(&requestBody)
+		if err != nil || requestBody.Email == "" || requestBody.Password == "" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			fmt.Fprint(w, `{"error": "Invalid request body"}`)
+			return
+		}
+
+		user, err := cfg.db.GetUserByEmail(r.Context(), requestBody.Email)
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnauthorized)
+			fmt.Fprint(w, `{"error": "Incorrect email or password"}`)
+			return
+		}
+
+		err = auth.CheckPasswordHash(requestBody.Password, user.HashedPassword)
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnauthorized)
+			fmt.Fprint(w, `{"error": "Incorrect email or password"}`)
+			return
+		}
+
+		respBody := struct {
+			ID        uuid.UUID `json:"id"`
+			Email     string    `json:"email"`
+			CreatedAt string    `json:"created_at"`
+			UpdatedAt string    `json:"updated_at"`
+		}{
 			ID:        user.ID,
 			Email:     user.Email,
 			CreatedAt: user.CreatedAt.Format("2006-01-02T15:04:05Z"),
@@ -92,7 +165,7 @@ func main() {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusCreated)
+		w.WriteHeader(http.StatusOK)
 		w.Write(data)
 	})
 
