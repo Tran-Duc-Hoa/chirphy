@@ -2,334 +2,76 @@ package main
 
 import (
 	"database/sql"
-	"encoding/json"
-	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"sync/atomic"
 
-	"github.com/Tran-Duc-Hoa/chirphy/internal/auth"
 	"github.com/Tran-Duc-Hoa/chirphy/internal/database"
-	"github.com/google/uuid"
 	"github.com/joho/godotenv"
 	_ "github.com/lib/pq"
 )
 
 type apiConfig struct {
 	fileserverHits atomic.Int32
-	db *database.Queries
-	platform string
-}
-
-func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		cfg.fileserverHits.Add(1)
-		next.ServeHTTP(w, r)
-	})
+	db             *database.Queries
+	platform       string
+	jwtSecret      string
 }
 
 func main() {
+	const filepathRoot = "."
+	const port = "8080"
+
 	godotenv.Load()
 	dbURL := os.Getenv("DB_URL")
-	db, err := sql.Open("postgres", dbURL)
-	if err != nil {
-		fmt.Printf("Error connecting to the database: %v\n", err)
-		return
+	if dbURL == "" {
+		log.Fatal("DB_URL must be set")
 	}
-	defer db.Close()
-	dbQueries := database.New(db)
+	platform := os.Getenv("PLATFORM")
+	if platform == "" {
+		log.Fatal("PLATFORM must be set")
+	}
+	jwtSecret := os.Getenv("JWT_SECRET")
+	if jwtSecret == "" {
+		log.Fatal("JWT_SECRET environment variable is not set")
+	}
+
+	dbConn, err := sql.Open("postgres", dbURL)
+	if err != nil {
+		log.Fatalf("Error opening database: %s", err)
+	}
+	dbQueries := database.New(dbConn)
+
+	apiCfg := apiConfig{
+		fileserverHits: atomic.Int32{},
+		db:             dbQueries,
+		platform:       platform,
+		jwtSecret:      jwtSecret,
+	}
 
 	mux := http.NewServeMux()
-	httpServer := &http.Server{
-		Addr:    ":8080",
+	fsHandler := apiCfg.middlewareMetricsInc(http.StripPrefix("/app", http.FileServer(http.Dir(filepathRoot))))
+	mux.Handle("/app/", fsHandler)
+
+	mux.HandleFunc("GET /api/healthz", handlerReadiness)
+
+	mux.HandleFunc("POST /api/login", apiCfg.handlerLogin)
+
+	mux.HandleFunc("POST /api/users", apiCfg.handlerUsersCreate)
+
+	mux.HandleFunc("POST /api/chirps", apiCfg.handlerChirpsCreate)
+	mux.HandleFunc("GET /api/chirps", apiCfg.handlerChirpsRetrieve)
+	mux.HandleFunc("GET /api/chirps/{chirpID}", apiCfg.handlerChirpsGet)
+
+	mux.HandleFunc("POST /admin/reset", apiCfg.handlerReset)
+	mux.HandleFunc("GET /admin/metrics", apiCfg.handlerMetrics)
+
+	srv := &http.Server{
+		Addr:    ":" + port,
 		Handler: mux,
 	}
 
-	cfg := &apiConfig{
-		db: dbQueries,
-		platform: os.Getenv("PLATFORM"),
-	}
-
-	mux.HandleFunc("POST /api/users", func(w http.ResponseWriter, r *http.Request) {
-		var requestBody struct {
-			Email    string `json:"email"`
-			Password string `json:"password"`
-		}
-
-		decoder := json.NewDecoder(r.Body)
-		err := decoder.Decode(&requestBody)
-		if err != nil || requestBody.Email == "" || requestBody.Password == "" {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusBadRequest)
-			fmt.Fprint(w, `{"error": "Invalid request body"}`)
-			return
-		}
-
-		hashedPassword, err := auth.HashPassword(requestBody.Password)
-		if err != nil {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusInternalServerError)
-			fmt.Fprint(w, `{"error": "Failed to hash password"}`)
-			return
-		}
-		user, err := cfg.db.CreateUser(r.Context(), database.CreateUserParams{
-			Email:    requestBody.Email,
-			HashedPassword: hashedPassword,
-		})
-		if err != nil {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusInternalServerError)
-			fmt.Fprint(w, `{"error": "Failed to create user"}`)
-			return
-		}
-
-		type responseBody struct {
-			ID        uuid.UUID `json:"id"`
-			Email     string    `json:"email"`
-			CreatedAt string    `json:"created_at"`
-			UpdatedAt string    `json:"updated_at"`
-		}
-
-		respBody := struct {
-				ID        uuid.UUID `json:"id"`
-				Email     string    `json:"email"`
-				CreatedAt string    `json:"created_at"`
-				UpdatedAt string    `json:"updated_at"`
-			}{
-				ID:        user.ID,
-				Email:     user.Email,
-				CreatedAt: user.CreatedAt.Format("2006-01-02T15:04:05Z"),
-				UpdatedAt: user.UpdatedAt.Format("2006-01-02T15:04:05Z"),
-			}
-
-		
-
-		data, err := json.Marshal(&respBody)
-		if err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			return
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusCreated)
-		w.Write(data)
-	})
-
-	mux.HandleFunc("POST /api/login", func(w http.ResponseWriter, r *http.Request) {
-		var requestBody struct {
-			Email    string `json:"email"`
-			Password string `json:"password"`
-		}
-
-		decoder := json.NewDecoder(r.Body)
-		err := decoder.Decode(&requestBody)
-		if err != nil || requestBody.Email == "" || requestBody.Password == "" {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusBadRequest)
-			fmt.Fprint(w, `{"error": "Invalid request body"}`)
-			return
-		}
-
-		user, err := cfg.db.GetUserByEmail(r.Context(), requestBody.Email)
-		if err != nil {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusUnauthorized)
-			fmt.Fprint(w, `{"error": "Incorrect email or password"}`)
-			return
-		}
-
-		err = auth.CheckPasswordHash(requestBody.Password, user.HashedPassword)
-		if err != nil {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusUnauthorized)
-			fmt.Fprint(w, `{"error": "Incorrect email or password"}`)
-			return
-		}
-
-		respBody := struct {
-			ID        uuid.UUID `json:"id"`
-			Email     string    `json:"email"`
-			CreatedAt string    `json:"created_at"`
-			UpdatedAt string    `json:"updated_at"`
-		}{
-			ID:        user.ID,
-			Email:     user.Email,
-			CreatedAt: user.CreatedAt.Format("2006-01-02T15:04:05Z"),
-			UpdatedAt: user.UpdatedAt.Format("2006-01-02T15:04:05Z"),
-		}
-
-		data, err := json.Marshal(&respBody)
-		if err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			return
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		w.Write(data)
-	})
-
-	mux.HandleFunc("POST /api/chirps", func(w http.ResponseWriter, r *http.Request) {
-		var requestBody struct {
-			Body string `json:"body"`
-			UserId uuid.UUID `json:"user_id"`
-		}
-		
-		decoder := json.NewDecoder(r.Body)
-		err := decoder.Decode(&requestBody)
-		if err != nil || requestBody.Body == "" || requestBody.UserId == uuid.Nil {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusBadRequest)
-			fmt.Fprint(w, `{"error": "Invalid request body"}`)
-			return
-		}
-
-		chirpyParams := database.CreateChirpyParams{
-			Body:   requestBody.Body,
-			UserID: requestBody.UserId,
-		}
-
-		chirpy, err := cfg.db.CreateChirpy(r.Context(), chirpyParams)
-		if err != nil {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusInternalServerError)
-			fmt.Fprint(w, `{"error": "Failed to create chirp"}`)
-			return
-		}
-
-		respBody := struct {
-			ID        uuid.UUID  `json:"id"`
-			CreatedAt string `json:"created_at"`
-			UpdatedAt string `json:"updated_at"`
-			Body      string `json:"body"`
-			UserId    uuid.UUID `json:"user_id"`
-		} {
-			ID:        chirpy.ID,
-			CreatedAt: chirpy.CreatedAt.Format("2006-01-02T15:04:05Z"),
-			UpdatedAt: chirpy.UpdatedAt.Format("2006-01-02T15:04:05Z"),
-			Body:      chirpy.Body,
-			UserId:    chirpy.UserID,
-		}
-		data, err := json.Marshal(&respBody)
-		if err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			return
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusCreated)
-		w.Write(data)
-	})
-	mux.HandleFunc("GET /api/chirps", func(w http.ResponseWriter, r *http.Request) {
-		chirps, err := cfg.db.GetChirps(r.Context())
-		if err != nil {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusInternalServerError)
-			fmt.Fprint(w, `{"error": "Failed to retrieve chirps"}`)
-			return
-		}
-
-		type responseBody struct {
-			ID        uuid.UUID  `json:"id"`
-			CreatedAt string `json:"created_at"`
-			UpdatedAt string `json:"updated_at"`
-			Body      string `json:"body"`
-			UserId    uuid.UUID `json:"user_id"`
-		}
-		respBody := make([]responseBody, len(chirps))
-
-		for i, chirp := range chirps {
-			respBody[i] = responseBody{
-				ID:        chirp.ID,
-				CreatedAt: chirp.CreatedAt.Format("2006-01-02T15:04:05Z"),
-				UpdatedAt: chirp.UpdatedAt.Format("2006-01-02T15:04:05Z"),
-				Body:      chirp.Body,
-				UserId:    chirp.UserID,
-			}	
-		}
-		data, err := json.Marshal(&respBody)
-		if err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		w.Write(data)
-	})
-
-	mux.HandleFunc("/api/chirps/", func(w http.ResponseWriter, r *http.Request) {
-		idStr := r.URL.Path[len("/api/chirps/"):]
-		if idStr == "" {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusBadRequest)
-			fmt.Fprint(w, `{"error": "Missing chirp ID"}`)
-			return
-		}
-		id, err := uuid.Parse(idStr)
-		if err != nil {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusBadRequest)
-			fmt.Fprint(w, `{"error": "Invalid chirp ID"}`)
-			return
-		}
-		chirp, err := cfg.db.GetChirpById(r.Context(), id)
-		if err != nil {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusInternalServerError)
-			fmt.Fprint(w, `{"error": "Failed to retrieve chirp"}`)
-			return
-		}
-		respBody := struct {
-			ID        uuid.UUID  `json:"id"`
-			CreatedAt string `json:"created_at"`
-			UpdatedAt string `json:"updated_at"`
-			Body      string `json:"body"`
-			UserId    uuid.UUID `json:"user_id"`
-		}{
-			ID:        chirp.ID,
-			CreatedAt: chirp.CreatedAt.Format("2006-01-02T15:04:05Z"),
-			UpdatedAt: chirp.UpdatedAt.Format("2006-01-02T15:04:05Z"),
-			Body:      chirp.Body,
-			UserId:    chirp.UserID,
-		}
-		data, err := json.Marshal(&respBody)
-		if err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		w.Write(data)
-	})
-
-	mux.Handle("/app/", cfg.middlewareMetricsInc(http.StripPrefix("/app", http.FileServer(http.Dir(".")))))
-	mux.Handle("GET /api/healthz", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("OK"))
-	}))
-	mux.HandleFunc("GET /admin/metrics", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/html")
-		w.WriteHeader(http.StatusOK)
-
-		htmlContent := fmt.Sprintf("<html><body><h1>Welcome, Chirpy Admin</h1><p>Chirpy has been visited %d times!</p></body></html>", cfg.fileserverHits.Load())
-
-		fmt.Fprint(w, htmlContent)
-	})
-	mux.HandleFunc("POST /admin/reset", func(w http.ResponseWriter, r *http.Request) {
-		if cfg.platform != "dev" {
-			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-			w.WriteHeader(http.StatusForbidden)
-			w.Write([]byte("You are not allowed to reset the hits\n"))
-			return
-		}
-		cfg.fileserverHits.Store(0)
-		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("Hits reset to 0\n"))
-	})
-
-	fmt.Print("Starting server on http://localhost:8080\n")
-	httpServer.ListenAndServe()
+	log.Printf("Serving on port: %s\n", port)
+	log.Fatal(srv.ListenAndServe())
 }
-
