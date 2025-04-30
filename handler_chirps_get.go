@@ -30,7 +30,11 @@ func (cfg *apiConfig) handlerChirpsGet(w http.ResponseWriter, r *http.Request) {
 }
 
 func (cfg *apiConfig) handlerChirpsRetrieve(w http.ResponseWriter, r *http.Request) {
+	authorId := r.URL.Query().Get("author_id")
 	dbChirps, err := cfg.db.GetChirps(r.Context())
+	if authorId != "" {
+		dbChirps, _ = cfg.db.GetChirpByUserId(r.Context(), uuid.MustParse(authorId))
+	}
 	if err != nil {
 		respondWithError(w, http.StatusInternalServerError, "Couldn't retrieve chirps", err)
 		return
