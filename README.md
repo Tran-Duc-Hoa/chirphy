@@ -28,7 +28,7 @@ Chirphy is a backend server for managing users, authentication, and chirps (post
 2. Install dependencies:
 
    ```bash
-   go mod tidy
+   go mod download
    ```
 
 3. Create a `.env` file in the root directory and configure the required environment variables ([see below](#environment-variables)).
